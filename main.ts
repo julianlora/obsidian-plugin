@@ -1,4 +1,37 @@
 import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { syntaxTree } from "@codemirror/language";
+import {
+  Extension,
+  RangeSetBuilder,
+  StateField,
+  Transaction,
+} from "@codemirror/state";
+import {
+  Decoration,
+  DecorationSet,
+  EditorView,
+  WidgetType,
+} from "@codemirror/view";
+import { text } from 'stream/consumers';
+
+// CREATE WIDGET ELEMENT
+export class AnnotationWidget extends WidgetType {
+	private text: string;
+
+    constructor(text: string) {
+        super();
+        this.text = text;
+    }
+
+	toDOM(view: EditorView): HTMLElement {
+		const div = document.createElement("div");
+
+		div.innerText = this.text;
+		div.className = "annotation"
+
+		return div;
+	}
+}
 
 // Remember to rename these classes and interfaces!
 
@@ -13,8 +46,147 @@ const DEFAULT_SETTINGS: MyPluginSettings = {
 export default class MyPlugin extends Plugin {
 	settings: MyPluginSettings;
 
+	private view = new EditorView()
+	private cursorNodeIndex = 0
+
+	private isCursorOnAnnotation(view: EditorView, searchText: string){
+		const cursorPos = view.state.selection.main.head
+		const textAtCursor = view.state.sliceDoc(cursorPos, cursorPos + searchText.length)
+		// console.log(textAtCursor)
+
+		return textAtCursor === searchText
+	}
+
 	async onload() {
 		await this.loadSettings();
+
+		// Almacenar referencia a this para usarla en el callback
+		const self = this;
+
+		// Actualizar posicion del cursor por teclado
+		this.registerDomEvent(document, "keydown", () => {
+			const selection = document.getSelection()
+			if (selection){
+				self.cursorNodeIndex = selection.anchorOffset
+			}
+		})
+		// Actualizar posicion del cursor por mouse
+		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
+			const selection = document.getSelection()
+			if (selection){
+				self.cursorNodeIndex = selection.anchorOffset
+			}
+		});
+
+
+		//Register state field
+		this.registerEditorExtension(StateField.define<DecorationSet>({
+			// DEFINE STATE FIELD
+			create(state): DecorationSet {
+				  return Decoration.none;
+			},
+			update(oldState: DecorationSet, transaction: Transaction): DecorationSet {
+				const builder = new RangeSetBuilder<Decoration>();
+			
+				syntaxTree(transaction.state).iterate({
+					enter(node) {
+						// Itera por nota o documento
+						if (node.type.name === "Document"){
+							// Obtener texto del nodo
+							const nodeText = transaction.state.sliceDoc(node.from, node.to);
+
+							// Dividir el texto en líneas o párrafos
+							const paragraphs = nodeText.split('\n');  // Puedes ajustar esto según la estructura de tu documento
+
+							// Ahora 'paragraphs' es un array que contiene los párrafos aislados
+							for (const paragraph of paragraphs) {
+								// Identificar comando en el párrafo
+								const index = paragraph.indexOf("::");
+								if (index !== -1) {
+									// Obtiene el texto que sigue a la cadena "::"
+									const textoSiguiente = paragraph.slice(index + 2, paragraph.length);
+
+									// Identificar el párrafo donde se encuentra el cursor y si el cursor esta sobre el comando
+									const selection = document.getSelection()
+									const selectionText = selection?.anchorNode?.textContent
+									if(!(selectionText == paragraph.slice(0, paragraph.length - textoSiguiente.length - 2) && self.cursorNodeIndex == selectionText.length)){
+										// Encontrar index del comando a nivel del documento general
+										const nodeIndex = nodeText.indexOf(paragraph) + paragraph.length - textoSiguiente.length - 2
+										// Mover texto
+										builder.add(
+											nodeIndex,
+											nodeIndex + textoSiguiente.length + 2,
+											Decoration.replace({
+												widget: new AnnotationWidget(textoSiguiente),
+											})
+										);
+									}
+
+								}
+
+							}
+
+			
+							// esto es para agregar botón
+							// if (node.type.name.includes("Document")) {
+							// 	builder.add(
+							// 		node.to,
+							// 		node.to + 1,
+							// 		Decoration.replace({
+							// 		widget: new EmojiWidget(),
+							// 		})
+							// 	);
+							// }
+						}
+					},
+				})
+				return builder.finish();
+				
+			},
+			provide(field: StateField<DecorationSet>): Extension {
+				  return EditorView.decorations.from(field);
+			},
+		}));
+
+		
+
+		
+
+		// Access content in file
+		this.app.workspace.on('active-leaf-change', async () => { // --> listener for obsidian events
+			const file = this.app.workspace.getActiveFile() // --> if this is not inside the listener, there will never be an active file before finishing onload
+			if (file){
+				let content = await this.app.vault.read(file)
+				let nuevo = content.replace(/::([^]*?)\n/g, ":: Nuevo texto reemplazado\n")
+			}
+			
+			
+
+
+		})
+		
+	
+		// CONTENT UPDATES
+		this.app.workspace.on('editor-change', editor => { // listener changes
+			const content = editor.getDoc().getValue() // content updated
+			// work with new content, sent it to method
+
+		})
+
+		
+
+		this.addCommand({
+			id: "convert-to-uppercase",
+			name: "Convert to uppercase",
+			editorCallback: (editor: Editor) => {
+			  const selection = editor.getSelection();
+			  editor.replaceSelection(selection.toUpperCase());
+			},
+		});
+
+
+		//-----------------------------------------------------------------------------------------
+		
 
 		// This creates an icon in the left ribbon.
 		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
@@ -67,12 +239,6 @@ export default class MyPlugin extends Plugin {
 
 		// This adds a settings tab so the user can configure various aspects of the plugin
 		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
 
 		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
 		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
